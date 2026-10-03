@@ -100,6 +100,7 @@ app.patch("/api/admin/orders/:id/send",auth("admin"),(req,res)=>{const o=db.prep
  db.prepare("UPDATE orders3 SET s=3,delivery_id=? WHERE id=?").run(d.id,o.id);res.json({ok:1})});
 app.patch("/api/admin/orders/:id/seller-paid",auth("admin"),(req,res)=>{db.prepare("UPDATE orders3 SET seller_paid=1 WHERE id=? AND s=4").run(+req.params.id);res.json({ok:1})});
 app.get("/api/admin/delivery",auth("admin"),(q,res)=>res.json(db.prepare("SELECT id,name,phone FROM users WHERE role='delivery' AND status='active' ORDER BY name").all()));
+app.get("/api/admin/customers",auth("admin"),(q,res)=>res.json(db.prepare("SELECT u.id,u.name,u.phone,u.created,COUNT(o.id) AS orders,COALESCE(SUM(CASE WHEN o.pay_status='verified' THEN o.total END),0) AS spent FROM users u LEFT JOIN orders3 o ON o.user_id=u.id WHERE u.role='customer' GROUP BY u.id ORDER BY u.id DESC LIMIT 500").all()));
 app.get("/api/admin/people",auth("admin"),(req,res)=>res.json(db.prepare("SELECT u.id,u.name,u.phone,u.role,u.status,u.created,s.shop,s.address,s.upi,s.fssai FROM users u LEFT JOIN sellers s ON s.user_id=u.id WHERE u.role IN ('seller','delivery') ORDER BY CASE u.status WHEN 'pending' THEN 0 ELSE 1 END,u.id DESC").all()));
 app.patch("/api/admin/users/:id",auth("admin"),(req,res)=>{const st=req.body.status;if(!["active","rejected","blocked"].includes(st))return bad(res,"Invalid status.");
  db.prepare("UPDATE users SET status=? WHERE id=? AND role IN ('seller','delivery')").run(st,+req.params.id);res.json({ok:1})});
