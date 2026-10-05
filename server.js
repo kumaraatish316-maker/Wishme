@@ -12,14 +12,26 @@ CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY,seller_id INT,name TE
 CREATE TABLE IF NOT EXISTS orders3(id INTEGER PRIMARY KEY,user_id INT,seller_id INT,product_id INT,pname TEXT,qty INT,unit_price INT,item_total INT,fee INT,total INT,commission INT,seller_amt INT,ev INT,date TEXT,slot TEXT,msg TEXT,cname TEXT,cphone TEXT,addr TEXT,pay_status TEXT DEFAULT 'pending',utr TEXT,s INT DEFAULT 0,otp TEXT,delivery_id INT,seller_paid INT DEFAULT 0,created TEXT);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT);`);
 for(const c of ["status TEXT DEFAULT 'active'","created TEXT"])try{db.exec("ALTER TABLE users ADD COLUMN "+c)}catch(e){}
+db.exec("CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY,user_id INT,txt TEXT,oid INT,t INT,rd INT DEFAULT 0);CREATE INDEX IF NOT EXISTS notes_u ON notes(user_id,id)");
+for(const c of ["refund_status TEXT DEFAULT ''","refund_data TEXT","refund_ref TEXT","cancel_t INT"])try{db.exec("ALTER TABLE orders3 ADD COLUMN "+c)}catch(e){}
 const getS=(k,d)=>{const r=db.prepare("SELECT v FROM settings WHERE k=?").get(k);return r?r.v:d};
-const DEF={upi_id:process.env.UPI_ID||"",upi_name:process.env.UPI_NAME||"Wishme",fee:"40",commission:"10"};
+const DEF={upi_id:process.env.UPI_ID||"8676849002@upi",upi_name:process.env.UPI_NAME||"SAHIL KUMAR",fee:"40",commission:"10"};
 const cfg=()=>Object.fromEntries(Object.keys(DEF).map(k=>[k,getS(k,DEF[k])]));
 const istDay=()=>new Date(Date.now()+5.5*36e5).toISOString().slice(0,10);
 if(process.env.ADMIN_PHONE&&process.env.ADMIN_PASS){const h=bcrypt.hashSync(process.env.ADMIN_PASS,10);let a=db.prepare("SELECT id FROM users WHERE phone=?").get(process.env.ADMIN_PHONE);
  if(a)db.prepare("UPDATE users SET pass=?,role='admin',status='active' WHERE id=?").run(h,a.id);else a={id:db.prepare("INSERT INTO users(name,phone,pass,role,status,created) VALUES('Owner',?,?,'admin','active',?)").run(process.env.ADMIN_PHONE,h,istDay()).lastInsertRowid};
  db.prepare("INSERT OR IGNORE INTO sellers(user_id,shop,address) VALUES(?,?,?)").run(a.id,"Wishme Kitchen","")}
 else console.warn("Set ADMIN_PHONE and ADMIN_PASS to create the owner login.");
+const WA={tok:process.env.WA_TOKEN,id:process.env.WA_PHONE_ID,tpl:process.env.WA_TEMPLATE,lang:process.env.WA_LANG||"en"},waOn=!!(WA.tok&&WA.id);
+function wa(phone,txt){if(!waOn||!/^\d{10}$/.test(phone||""))return;
+ const to="91"+phone,body=WA.tpl?{messaging_product:"whatsapp",to,type:"template",template:{name:WA.tpl,language:{code:WA.lang},components:[{type:"body",parameters:[{type:"text",text:txt.replace(/\s+/g," ").slice(0,500)}]}]}}:{messaging_product:"whatsapp",to,type:"text",text:{body:"Wishme: "+txt}};
+ fetch("https://graph.facebook.com/v20.0/"+WA.id+"/messages",{method:"POST",headers:{Authorization:"Bearer "+WA.tok,"Content-Type":"application/json"},body:JSON.stringify(body)}).then(r=>{if(!r.ok)r.text().then(t=>console.warn("WhatsApp failed",r.status,t.slice(0,200)))}).catch(e=>console.warn("WhatsApp error",e.message))}
+const note=(uid,txt,oid)=>{try{db.prepare("INSERT INTO notes(user_id,txt,oid,t) VALUES(?,?,?,?)").run(uid,txt,oid||null,Date.now())}catch(e){}};
+const tell=(o,txt)=>{note(o.user_id,txt,o.id);wa(o.cphone,txt)};
+const tellUser=(uid,txt,oid,w)=>{note(uid,txt,oid);if(w){const u=db.prepare("SELECT phone FROM users WHERE id=?").get(uid);if(u)wa(u.phone,txt)}};
+const tellAdmin=(txt,oid)=>db.prepare("SELECT id FROM users WHERE role='admin'").all().forEach(a=>note(a.id,txt,oid));
+const dayGap=d=>Math.round((Date.parse(d+"T00:00:00Z")-Date.parse(istDay()+"T00:00:00Z"))/864e5);
+const canCancel=o=>o.s>=0&&o.s<=2&&dayGap(o.date)>=1;
 const app=express();app.set("trust proxy",1);app.disable("x-powered-by");
 app.use((q,r,n)=>express.json({limit:/^\/api\/(apply|seller\/products)/.test(q.path)?"3mb":"30kb"})(q,r,n));
 app.use((q,r,n)=>{r.setHeader("X-Content-Type-Options","nosniff");n()});
@@ -30,7 +42,7 @@ const auth=(...roles)=>(req,res,next)=>{try{const p=jwt.verify((req.headers.auth
 const phoneOk=p=>/^\d{10}$/.test(p||""),str=(v,n)=>String(v||"").trim().slice(0,n);
 const imgOk=s=>typeof s=="string"&&s.length<600000&&/^data:image\/jpeg;base64,[A-Za-z0-9+\/=]+$/.test(s)?s:null;
 const SEL="SELECT o.*,s.shop,s.address AS saddr,d.name AS dname FROM orders3 o LEFT JOIN sellers s ON s.user_id=o.seller_id LEFT JOIN users d ON d.id=o.delivery_id";
-const base=o=>({id:o.id,pname:o.pname,qty:o.qty,item_total:o.item_total,fee:o.fee,total:o.total,ev:o.ev,date:o.date,slot:o.slot,msg:o.msg,pay_status:o.pay_status,s:o.s,shop:o.shop,dname:o.dname,created:o.created});
+const base=o=>({id:o.id,pname:o.pname,qty:o.qty,item_total:o.item_total,fee:o.fee,total:o.total,ev:o.ev,date:o.date,slot:o.slot,msg:o.msg,pay_status:o.pay_status,s:o.s,can_cancel:canCancel(o),refund_status:o.refund_status||"",refund_ref:o.refund_ref||"",shop:o.shop,dname:o.dname,created:o.created});
 const SLOTS=["10 AM – 12 PM","12 PM – 3 PM","3 PM – 6 PM","6 PM – 9 PM"];
 const sign=u=>({token:jwt.sign({id:u.id},SECRET,{expiresIn:"12h"}),role:u.role,name:u.name});
 app.get("/",(q,r)=>r.sendFile(__dirname+"/index.html"));
@@ -50,7 +62,7 @@ app.post("/api/apply/seller",limit(10,36e5),(req,res)=>{const b=req.body||{},nam
  if(name.length<2||!phoneOk(phone)||String(b.password||"").length<6||shop.length<2||address.length<10)return bad(res,"Fill your name, mobile, password (6+), shop name and full shop address.");
  if(!/^[\w.\-]{2,}@[\w]{2,}$/.test(upi))return bad(res,"Enter a valid UPI ID for payouts, like name@bank.");
  if(fssai&&!/^\d{14}$/.test(fssai))return bad(res,"FSSAI number must be 14 digits (or leave it empty).");
- try{db.transaction(()=>{const id=db.prepare("INSERT INTO users(name,phone,pass,role,status,created) VALUES(?,?,?,'seller','pending',?)").run(name,phone,bcrypt.hashSync(String(b.password),10),istDay()).lastInsertRowid;db.prepare("INSERT INTO sellers(user_id,shop,address,upi,fssai) VALUES(?,?,?,?,?)").run(id,shop,address,upi,fssai)})();res.json({ok:1})}catch(e){bad(res,"This mobile number is already registered.")}});
+ try{db.transaction(()=>{const id=db.prepare("INSERT INTO users(name,phone,pass,role,status,created) VALUES(?,?,?,'seller','pending',?)").run(name,phone,bcrypt.hashSync(String(b.password),10),istDay()).lastInsertRowid;db.prepare("INSERT INTO sellers(user_id,shop,address,upi,fssai) VALUES(?,?,?,?,?)").run(id,shop,address,upi,fssai)})();tellAdmin("New seller application: "+shop+" ("+name+")");res.json({ok:1})}catch(e){bad(res,"This mobile number is already registered.")}});
 app.post("/api/apply/delivery",limit(10,36e5),(req,res)=>{const b=req.body||{},name=str(b.name,60),phone=String(b.phone||""),pan=str(b.pan,10).toUpperCase(),aad=String(b.aadhaar||""),acct=String(b.acct||""),ifsc=str(b.ifsc,11).toUpperCase(),holder=str(b.holder,60),addr=str(b.addr,200),docs=b.docs||{};
  if(name.length<2||!phoneOk(phone)||String(b.password||"").length<6||addr.length<10)return bad(res,"Fill your name, mobile, password (6+) and full address.");
  if(!/^[A-Z]{5}\d{4}[A-Z]$/.test(pan))return bad(res,"Enter a valid PAN, like ABCDE1234F.");
@@ -58,7 +70,7 @@ app.post("/api/apply/delivery",limit(10,36e5),(req,res)=>{const b=req.body||{},n
  if(!/^\d{9,18}$/.test(acct)||!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)||holder.length<2)return bad(res,"Enter a valid bank account number, IFSC and account holder name.");
  const d={};for(const k of ["aadhaar","pan","passbook","selfie"]){d[k]=imgOk(docs[k]);if(!d[k])return bad(res,"Add a clear photo for: "+({aadhaar:"Aadhaar card",pan:"PAN card",passbook:"Bank passbook",selfie:"Your selfie"})[k]+".")}
  try{db.transaction(()=>{const id=db.prepare("INSERT INTO users(name,phone,pass,role,status,created) VALUES(?,?,?,'delivery','pending',?)").run(name,phone,bcrypt.hashSync(String(b.password),10),istDay()).lastInsertRowid;
-  db.prepare("INSERT INTO kyc(user_id,data) VALUES(?,?)").run(id,enc({pan,aadhaar4:aad.slice(-4),acct,ifsc,holder,addr,docs:d}))})();res.json({ok:1})}catch(e){bad(res,"This mobile number is already registered.")}});
+  db.prepare("INSERT INTO kyc(user_id,data) VALUES(?,?)").run(id,enc({pan,aadhaar4:aad.slice(-4),acct,ifsc,holder,addr,docs:d}))})();tellAdmin("New delivery partner application: "+name);res.json({ok:1})}catch(e){bad(res,"This mobile number is already registered.")}});
 const ANY=["customer","admin","seller","delivery"];
 app.post("/api/orders",auth(...ANY),limit(30,36e5),(req,res)=>{const b=req.body||{},p=db.prepare("SELECT p.*,u.status AS st FROM products p JOIN users u ON u.id=p.seller_id WHERE p.id=? AND p.active=1").get(+b.product_id);
  const qty=Math.floor(+b.qty),ev=Number(b.ev),name=str(b.name,60),phone=String(b.phone||""),addr=str(b.addr,250);
@@ -70,13 +82,14 @@ app.post("/api/orders",auth(...ANY),limit(30,36e5),(req,res)=>{const b=req.body|
  const c=cfg(),item=p.price*qty,fee=Math.round(+c.fee),isOwn=db.prepare("SELECT role FROM users WHERE id=?").get(p.seller_id).role==="admin",comm=isOwn?0:Math.round(item*(+c.commission)/100);
  const id=(db.prepare("SELECT MAX(id) m FROM orders3").get().m||1000)+1,otp=String(crypto.randomInt(1000,10000));
  db.prepare("INSERT INTO orders3(id,user_id,seller_id,product_id,pname,qty,unit_price,item_total,fee,total,commission,seller_amt,ev,date,slot,msg,cname,cphone,addr,otp,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-  .run(id,req.user.id,p.seller_id,p.id,p.name,qty,p.price,item,fee,item+fee,comm,item-comm,ev,b.date,b.slot,str(b.msg,30),name,phone,addr,otp,istDay());res.json({id})});
+  .run(id,req.user.id,p.seller_id,p.id,p.name,qty,p.price,item,fee,item+fee,comm,item-comm,ev,b.date,b.slot,str(b.msg,30),name,phone,addr,otp,istDay());
+ tell({id,user_id:req.user.id,cphone:phone},"Order #WM"+id+" placed for "+b.date+". Please pay Rs "+(item+fee)+" by UPI to confirm it.");res.json({id})});
 app.get("/api/orders/mine",auth(...ANY),(req,res)=>res.json(db.prepare(SEL+" WHERE o.user_id=? ORDER BY o.id DESC LIMIT 100").all(req.user.id).map(o=>({...base(o),utr:o.utr,cname:o.cname,cphone:o.cphone,addr:o.addr,otp:o.otp}))));
 app.post("/api/orders/:id/pay",auth(...ANY),limit(30,36e5),(req,res)=>{const utr=str((req.body||{}).utr,24).toUpperCase(),o=db.prepare("SELECT * FROM orders3 WHERE id=? AND user_id=?").get(+req.params.id,req.user.id);
- if(!o||!["pending","rejected"].includes(o.pay_status))return bad(res,"This order cannot take a payment now.");
+ if(!o||o.s<0||!["pending","rejected"].includes(o.pay_status))return bad(res,"This order cannot take a payment now.");
  if(!/^[A-Z0-9]{8,24}$/.test(utr))return bad(res,"Enter the UPI transaction ID (UTR) from your payment app.");
  if(db.prepare("SELECT 1 FROM orders3 WHERE utr=? AND id<>?").get(utr,o.id))return bad(res,"This transaction ID was already used.");
- db.prepare("UPDATE orders3 SET utr=?,pay_status='submitted' WHERE id=?").run(utr,o.id);res.json({ok:1})});
+ db.prepare("UPDATE orders3 SET utr=?,pay_status='submitted' WHERE id=?").run(utr,o.id);tellAdmin("Payment of Rs "+o.total+" to check for order #WM"+o.id,o.id);res.json({ok:1})});
 app.get("/api/seller/products",auth("seller","admin"),(req,res)=>res.json(db.prepare("SELECT id,name,descr,price,unit,active,upd,length(img)>0 AS hasimg FROM products WHERE seller_id=? ORDER BY id DESC").all(req.user.id)));
 app.post("/api/seller/products",auth("seller","admin"),(req,res)=>{const b=req.body||{},name=str(b.name,80),price=Math.round(+b.price),img=imgOk(b.img);
  if(name.length<2||!(price>=10&&price<=100000))return bad(res,"Enter a product name and a price between ₹10 and ₹1,00,000.");
@@ -86,27 +99,45 @@ app.patch("/api/seller/products/:id",auth("seller","admin"),(req,res)=>{const p=
  const b=req.body||{},price=b.price===undefined?p.price:Math.round(+b.price);if(!(price>=10&&price<=100000))return bad(res,"Price must be between ₹10 and ₹1,00,000.");
  db.prepare("UPDATE products SET price=?,active=?,upd=? WHERE id=?").run(price,b.active===undefined?p.active:(b.active?1:0),Date.now(),p.id);res.json({ok:1})});
 app.delete("/api/seller/products/:id",auth("seller","admin"),(req,res)=>{const r=db.prepare("DELETE FROM products WHERE id=? AND seller_id=?").run(+req.params.id,req.user.id);if(!r.changes)return bad(res,"Product not found.",404);res.json({ok:1})});
-app.get("/api/seller/orders",auth("seller","admin"),(req,res)=>res.json(db.prepare(SEL+" WHERE o.seller_id=? AND o.s>=1 ORDER BY o.id DESC LIMIT 200").all(req.user.id).map(o=>({...base(o),commission:o.commission,seller_amt:o.seller_amt,seller_paid:o.seller_paid}))));
-app.patch("/api/seller/orders/:id/prepare",auth("seller","admin"),(req,res)=>{const o=db.prepare("SELECT * FROM orders3 WHERE id=? AND seller_id=?").get(+req.params.id,req.user.id);if(!o||o.s!==1)return bad(res,"This order cannot be started now.");db.prepare("UPDATE orders3 SET s=2 WHERE id=?").run(o.id);res.json({ok:1})});
+app.get("/api/seller/orders",auth("seller","admin"),(req,res)=>res.json(db.prepare(SEL+" WHERE o.seller_id=? AND (o.s>=1 OR (o.s<0 AND o.pay_status='verified')) ORDER BY o.id DESC LIMIT 200").all(req.user.id).map(o=>({...base(o),commission:o.commission,seller_amt:o.seller_amt,seller_paid:o.seller_paid}))));
+app.patch("/api/seller/orders/:id/prepare",auth("seller","admin"),(req,res)=>{const o=db.prepare("SELECT * FROM orders3 WHERE id=? AND seller_id=?").get(+req.params.id,req.user.id);if(!o||o.s!==1)return bad(res,"This order cannot be started now.");db.prepare("UPDATE orders3 SET s=2 WHERE id=?").run(o.id);tell(o,"Your order #WM"+o.id+" is being prepared 🎂");tellAdmin("Order #WM"+o.id+" is ready to send. Assign a delivery partner.",o.id);res.json({ok:1})});
 app.get("/api/delivery/orders",auth("delivery"),(req,res)=>res.json(db.prepare(SEL+" WHERE o.delivery_id=? AND o.s>=3 ORDER BY o.id DESC LIMIT 100").all(req.user.id).map(o=>({...base(o),cname:o.cname,cphone:o.cphone,addr:o.addr,saddr:o.saddr}))));
 app.post("/api/delivery/orders/:id/deliver",auth("delivery"),limit(40,36e5),(req,res)=>{const o=db.prepare("SELECT * FROM orders3 WHERE id=? AND delivery_id=? AND s=3").get(+req.params.id,req.user.id);
  if(!o)return bad(res,"This order is not out for delivery.");if(o.otp!==String((req.body||{}).otp||"").trim())return bad(res,"Wrong OTP. Ask the customer for the 4-digit code.");
- db.prepare("UPDATE orders3 SET s=4 WHERE id=?").run(o.id);res.json({ok:1})});
+ db.prepare("UPDATE orders3 SET s=4 WHERE id=?").run(o.id);tell(o,"Order #WM"+o.id+" delivered. Enjoy your celebration! 🎉");res.json({ok:1})});
 app.get("/api/admin/orders",auth("admin"),(q,res)=>res.json(db.prepare(SEL+" ORDER BY o.id DESC LIMIT 300").all().map(o=>({...base(o),utr:o.utr,cname:o.cname,cphone:o.cphone,addr:o.addr,commission:o.commission,seller_amt:o.seller_amt,seller_paid:o.seller_paid,delivery_id:o.delivery_id}))));
-app.patch("/api/admin/orders/:id/payment",auth("admin"),(req,res)=>{const o=db.prepare("SELECT * FROM orders3 WHERE id=?").get(+req.params.id);if(!o||o.pay_status!=="submitted")return bad(res,"No payment is waiting to be checked.");
- if(req.body.action==="verify")db.prepare("UPDATE orders3 SET pay_status='verified',s=CASE WHEN s=0 THEN 1 ELSE s END WHERE id=?").run(o.id);else db.prepare("UPDATE orders3 SET pay_status='rejected',utr=NULL WHERE id=?").run(o.id);res.json({ok:1})});
+app.patch("/api/admin/orders/:id/payment",auth("admin"),(req,res)=>{const o=db.prepare("SELECT * FROM orders3 WHERE id=?").get(+req.params.id);if(!o||o.s<0||o.pay_status!=="submitted")return bad(res,"No payment is waiting to be checked.");
+ if(req.body.action==="verify"){db.prepare("UPDATE orders3 SET pay_status='verified',s=CASE WHEN s=0 THEN 1 ELSE s END WHERE id=?").run(o.id);tell(o,"Payment received ✔ Your order #WM"+o.id+" is confirmed for "+o.date+" ("+o.slot+").");tellUser(o.seller_id,"New order #WM"+o.id+": "+o.pname+" x "+o.qty+" for "+o.date+", "+o.slot+". Please start preparing.",o.id,1)}
+ else{db.prepare("UPDATE orders3 SET pay_status='rejected',utr=NULL WHERE id=?").run(o.id);tell(o,"We could not find your payment for order #WM"+o.id+". Please pay again from My orders, or contact us.")}res.json({ok:1})});
 app.patch("/api/admin/orders/:id/send",auth("admin"),(req,res)=>{const o=db.prepare("SELECT * FROM orders3 WHERE id=?").get(+req.params.id),d=db.prepare("SELECT id FROM users WHERE id=? AND role='delivery' AND status='active'").get(+req.body.delivery_id);
  if(!o||o.s!==2)return bad(res,"The seller has not finished preparing this order yet.");if(!d)return bad(res,"Choose an approved delivery partner.");
- db.prepare("UPDATE orders3 SET s=3,delivery_id=? WHERE id=?").run(d.id,o.id);res.json({ok:1})});
+ db.prepare("UPDATE orders3 SET s=3,delivery_id=? WHERE id=?").run(d.id,o.id);tell(o,"Order #WM"+o.id+" is out for delivery. Give OTP "+o.otp+" to the delivery partner when it arrives.");tellUser(d.id,"New delivery assigned: order #WM"+o.id+".",o.id,1);res.json({ok:1})});
 app.patch("/api/admin/orders/:id/seller-paid",auth("admin"),(req,res)=>{db.prepare("UPDATE orders3 SET seller_paid=1 WHERE id=? AND s=4").run(+req.params.id);res.json({ok:1})});
 app.get("/api/admin/delivery",auth("admin"),(q,res)=>res.json(db.prepare("SELECT id,name,phone FROM users WHERE role='delivery' AND status='active' ORDER BY name").all()));
-app.get("/api/admin/customers",auth("admin"),(q,res)=>res.json(db.prepare("SELECT u.id,u.name,u.phone,u.created,COUNT(o.id) AS orders,COALESCE(SUM(CASE WHEN o.pay_status='verified' THEN o.total END),0) AS spent FROM users u LEFT JOIN orders3 o ON o.user_id=u.id WHERE u.role='customer' GROUP BY u.id ORDER BY u.id DESC LIMIT 500").all()));
+app.get("/api/admin/customers",auth("admin"),(q,res)=>res.json(db.prepare("SELECT u.id,u.name,u.phone,u.created,COUNT(o.id) AS orders,COALESCE(SUM(CASE WHEN o.pay_status='verified' AND o.s>=0 THEN o.total END),0) AS spent FROM users u LEFT JOIN orders3 o ON o.user_id=u.id WHERE u.role='customer' GROUP BY u.id ORDER BY u.id DESC LIMIT 500").all()));
 app.get("/api/admin/people",auth("admin"),(req,res)=>res.json(db.prepare("SELECT u.id,u.name,u.phone,u.role,u.status,u.created,s.shop,s.address,s.upi,s.fssai FROM users u LEFT JOIN sellers s ON s.user_id=u.id WHERE u.role IN ('seller','delivery') ORDER BY CASE u.status WHEN 'pending' THEN 0 ELSE 1 END,u.id DESC").all()));
 app.patch("/api/admin/users/:id",auth("admin"),(req,res)=>{const st=req.body.status;if(!["active","rejected","blocked"].includes(st))return bad(res,"Invalid status.");
  db.prepare("UPDATE users SET status=? WHERE id=? AND role IN ('seller','delivery')").run(st,+req.params.id);res.json({ok:1})});
 app.get("/api/admin/kyc/:id",auth("admin"),(req,res)=>{const u=db.prepare("SELECT id,name,phone,role,status FROM users WHERE id=? AND role IN ('seller','delivery')").get(+req.params.id);if(!u)return bad(res,"Not found.",404);
  const k=db.prepare("SELECT data FROM kyc WHERE user_id=?").get(u.id),s=db.prepare("SELECT shop,address,upi,fssai FROM sellers WHERE user_id=?").get(u.id);res.json({user:u,seller:s||null,kyc:k?dec(k.data):null})});
-app.get("/api/admin/settings",auth("admin"),(q,res)=>res.json(cfg()));
+app.post("/api/orders/:id/cancel",auth(...ANY),limit(20,36e5),(req,res)=>{const o=db.prepare("SELECT * FROM orders3 WHERE id=? AND user_id=?").get(+req.params.id,req.user.id);
+ if(!o)return bad(res,"Order not found.",404);if(o.s<0)return bad(res,"This order is already cancelled.");
+ if(!canCancel(o))return bad(res,o.s>2?"This order is already out for delivery.":"Orders can be cancelled only until 1 day before the event date.");
+ const paid=["verified","submitted"].includes(o.pay_status),b=req.body||{};let rd=null;
+ if(paid){if(b.mode==="bank"){const acct=String(b.acct||""),ifsc=str(b.ifsc,11).toUpperCase(),holder=str(b.holder,60);
+   if(!/^\d{9,18}$/.test(acct)||!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)||holder.length<2)return bad(res,"Enter a valid account number, IFSC and account holder name for the refund.");rd={mode:"bank",acct,ifsc,holder}}
+  else{const upi=str(b.upi,60);if(!/^[\w.\-]{2,}@[\w]{2,}$/.test(upi))return bad(res,"Enter your UPI ID for the refund, like name@bank.");rd={mode:"upi",upi}}}
+ db.prepare("UPDATE orders3 SET s=-1,cancel_t=?,refund_status=?,refund_data=? WHERE id=?").run(Date.now(),paid?"due":"",rd?enc(rd):null,o.id);
+ tell(o,"Order #WM"+o.id+" is cancelled."+(paid?" Your refund of Rs "+o.total+" will be sent to the "+(rd.mode==="bank"?"bank account":"UPI ID")+" you gave.":""));
+ if(o.pay_status==="verified")tellUser(o.seller_id,"Order #WM"+o.id+" ("+o.pname+" for "+o.date+") was cancelled by the customer. Do not prepare it.",o.id,1);
+ tellAdmin("Order #WM"+o.id+" cancelled by customer."+(paid?" Refund of Rs "+o.total+" is due.":""),o.id);res.json({ok:1})});
+app.get("/api/admin/refunds",auth("admin"),(q,res)=>res.json(db.prepare("SELECT id,pname,total,cname,cphone,utr,refund_status,refund_ref,refund_data,cancel_t FROM orders3 WHERE refund_status IN ('due','done') ORDER BY CASE refund_status WHEN 'due' THEN 0 ELSE 1 END,cancel_t DESC LIMIT 200").all().map(r=>({...r,refund_data:undefined,to:r.refund_data?dec(r.refund_data):null}))));
+app.patch("/api/admin/orders/:id/refund",auth("admin"),(req,res)=>{const o=db.prepare("SELECT * FROM orders3 WHERE id=?").get(+req.params.id);if(!o||o.refund_status!=="due")return bad(res,"No refund is waiting for this order.");
+ const ref=str((req.body||{}).ref,30);db.prepare("UPDATE orders3 SET refund_status='done',refund_ref=? WHERE id=?").run(ref,o.id);
+ tell(o,"Refund of Rs "+o.total+" for order #WM"+o.id+" has been sent."+(ref?" Reference: "+ref+".":"")+" It may take a few hours to show in your account.");res.json({ok:1})});
+app.get("/api/notifications",auth(...ANY),(req,res)=>res.json({unread:db.prepare("SELECT COUNT(*) c FROM notes WHERE user_id=? AND rd=0").get(req.user.id).c,items:db.prepare("SELECT id,txt,oid,t,rd FROM notes WHERE user_id=? ORDER BY id DESC LIMIT 40").all(req.user.id)}));
+app.post("/api/notifications/read",auth(...ANY),(req,res)=>{db.prepare("UPDATE notes SET rd=1 WHERE user_id=?").run(req.user.id);res.json({ok:1})});
+app.get("/api/admin/settings",auth("admin"),(q,res)=>res.json({...cfg(),wa_on:waOn}));
 app.put("/api/admin/settings",auth("admin"),(req,res)=>{const b=req.body||{},upi=str(b.upi_id,60),fee=Math.round(+b.fee),com=+b.commission;
  if(upi&&!/^[\w.\-]{2,}@[\w]{2,}$/.test(upi))return bad(res,"Enter a valid UPI ID, like 9876543210@ippb.");
  if(!(fee>=0&&fee<=500)||!(com>=0&&com<=50))return bad(res,"Delivery fee must be 0–500 and commission 0–50%.");
